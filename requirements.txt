@@ -2,3 +2,8 @@ jupyterlab
 pyspark==3.5.1
 mlflow
 psycopg2-binary
+kafka-python
+apache-airflow-client
+pandas
+matplotlib
+seaborn

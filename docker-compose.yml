@@ -1,7 +1,8 @@
 version: '3.8'
 
 services:
-  # Contenedor todo-en-uno
+  # --- SERVICIOS EXISTENTES (Actualizados) ---
+  # Contenedor principal para Spark, Jupyter y MLflow
   stack-completo:
     build: .
     container_name: python_ml_stack
@@ -9,26 +10,123 @@ services:
       - "8888:8888"  # JupyterLab UI
       - "8080:8080"  # Spark Master UI
       - "5000:5000"  # MLflow UI
+      - "7077:7077"  # Spark Master Port
+      - "7078:7078"  # Spark Worker Port
     volumes:
       - ./notebooks:/app/notebooks
       - mlflow-artifacts:/app/mlflow_artifacts
     networks:
       - ml-net
+    environment:
+      - SPARK_MASTER=spark://localhost:7077
     depends_on:
       - postgres-db
+      - kafka
 
-  # Base de datos para MLflow
+  # Base de datos compartida (MLflow y Airflow)
   postgres-db:
     image: postgres:14
     container_name: postgres_db
     environment:
-      - POSTGRES_USER=mlflow_user
-      - POSTGRES_PASSWORD=mlflow_pass
-      - POSTGRES_DB=mlflow_db
+      - POSTGRES_USER=admin_user
+      - POSTGRES_PASSWORD=admin_pass
+      # Nota: En un entorno real, necesitarías un script de inicialización para crear
+      # múltiples bases de datos (mlflow_db, airflow_db).
+      # Para simplificar este taller, usaremos la base de datos por defecto 'postgres'
+      # o 'mlflow_db' si el contenedor lo permite, pero Airflow suele requerir su propia DB.
+      # Una estrategia simple es usar la misma DB o configurar un script en /docker-entrypoint-initdb.d/
+      - POSTGRES_DB=mlflow_db 
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - ml-net
+
+  # --- NUEVOS SERVICIOS: KAFKA (Ingesta de Datos) ---
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - ml-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - ml-net
+
+  # --- NUEVOS SERVICIOS: AIRFLOW (Orquestación) ---
+  # Inicializador de Airflow (solo corre una vez para configurar la DB)
+  airflow-init:
+    image: apache/airflow:2.7.1
+    container_name: airflow_init
+    command: version
+    environment:
+      # Usamos la misma instancia de Postgres, idealmente en una DB separada 'airflow_db'
+      # Aquí reutilizamos las credenciales de admin_user
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://admin_user:admin_pass@postgres-db/mlflow_db
+      - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=true
+      # Crear usuario admin por defecto
+      - _AIRFLOW_DB_UPGRADE=true
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME=admin
+      - _AIRFLOW_WWW_USER_PASSWORD=admin
+    networks:
+      - ml-net
+    depends_on:
+      - postgres-db
+
+  airflow-webserver:
+    image: apache/airflow:2.7.1
+    container_name: airflow_webserver
+    restart: always
+    depends_on:
+      - postgres-db
+      - airflow-init
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://admin_user:admin_pass@postgres-db/mlflow_db
+      - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=true
+    ports:
+      - "8081:8080" # Puerto mapeado a 8081 para evitar conflicto con Spark UI (8080)
+    volumes:
+      - ./dags:/opt/airflow/dags
+    networks:
+      - ml-net
+    command: webserver
+
+  airflow-scheduler:
+    image: apache/airflow:2.7.1
+    container_name: airflow_scheduler
+    restart: always
+    depends_on:
+      - postgres-db
+      - airflow-init
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://admin_user:admin_pass@postgres-db/mlflow_db
+      - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=true
+    volumes:
+      - ./dags:/opt/airflow/dags
+    networks:
+      - ml-net
+    command: scheduler
 
 volumes:
   postgres-data:
